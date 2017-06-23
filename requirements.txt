@@ -1,0 +1,5 @@
+fastqc
+multiqc
+star
+samtools
+pigz
