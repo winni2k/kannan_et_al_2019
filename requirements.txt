@@ -3,3 +3,4 @@ multiqc
 star
 samtools
 pigz
+subread

@@ -10,7 +10,7 @@ class FrozenClass(object):
 
     def __setattr__(self, key, value):
         if self.__isfrozen and not hasattr(self, key):
-            raise TypeError("%r is a frozen class" % self)
+            raise TypeError("Cannot set {}: {} is a frozen class".format(key, self))
         object.__setattr__(self, key, value)
 
     def _freeze(self):
@@ -51,9 +51,10 @@ def collate_fastqs_to_experimental_samples(fastqs):
         exp_samples.append(
             Messenger(
                 fastqs=list(fastq_iter),
-                sample_name=exp_samp,
+                name=exp_samp,
                 star_bam_merged=None,
                 htseq_counts=None,
+                featureCounts_counts=None,
             )
         )
     return exp_samples
@@ -75,6 +76,7 @@ fastqc_dir = join(results_dir, "fastqc")
 rseqc_dir = join(results_dir, "rseqc")
 alignment_dir = join(results_dir, "alignment")
 htseq_dir = join(results_dir, "htseq")
+featureCounts_dir = join(results_dir, "featureCounts")
 
 # Pre-processing of the gtf file
 ensembl_annotations_with_chr = join(results_dir, "annotations", "ensembl",
@@ -147,7 +149,7 @@ dm.add(multiqc_report, chain(*[(f.fastqc_report, f.star_bam, f.read_dist_report)
 exp_samples = collate_fastqs_to_experimental_samples(fastqs)
 for sample in exp_samples:
     star_bams = [f.star_bam for f in sample.fastqs]
-    sample.star_bam_merged = join(alignment_dir, "star_by_experimental_sample", sample.sample_name,
+    sample.star_bam_merged = join(alignment_dir, "star_by_experimental_sample", sample.name,
                                   "merged.bam")
     dm.add(
         sample.star_bam_merged, star_bams,
@@ -160,7 +162,7 @@ for sample in exp_samples:
     )
 
     # HT-seq - count reads on features
-    sample.htseq_counts = join(htseq_dir, sample.sample_name, sample.sample_name + ".counts")
+    sample.htseq_counts = join(htseq_dir, sample.name, sample.name + ".counts")
     dm.add(
         sample.htseq_counts,
         sample.star_bam_merged,
@@ -171,19 +173,36 @@ for sample in exp_samples:
                                      sample.htseq_counts)
     )
 
+    # try featureCounts - count reads on features
+    sample.featureCounts_counts = join(featureCounts_dir, sample.name, sample.name + ".counts")
+    dm.add(
+        sample.featureCounts_counts,
+        sample.star_bam_merged,
+        " featureCounts"
+        " -a <(zcat {}) -o {} {}".format(ensembl_annotations_with_chr,
+                                         sample.htseq_counts,
+                                         sample.star_bam_merged, )
+    )
+
 sample_multiqc_report = join(results_dir, "multiqc_per_experimental_sample", "multiqc_report.html")
 dm.add(sample_multiqc_report,
-       [s.htseq_counts for s in exp_samples],
-       "multiqc -d -dd 1 -f --outdir {} {}".format(dirname(sample_multiqc_report), htseq_dir))
+       chain(*[(s.htseq_counts, s.featureCounts_counts) for s in exp_samples]),
+       "multiqc -d -dd 1 -f --outdir {} {} {}".format(dirname(sample_multiqc_report), htseq_dir,
+                                                      featureCounts_dir))
 
 # collate counts into one csv
+exp_samples = sorted(exp_samples, key=lambda x: x.name)
 htseq_counts = [s.htseq_counts for s in exp_samples]
-htseq_merged_counts = join(htseq_dir, "all_sample_counts.txt")
+htseq_merged_counts = join(htseq_dir, "all_sample_counts.csv")
 dm.add(
     htseq_merged_counts, htseq_counts,
     "echo -e 'Feature\t" +
-    "\t".join([s.experimental_sample for s in exp_samples]) + "' > " + htseq_merged_counts +
+    "\t".join([s.name for s in exp_samples]) + "' > " + htseq_merged_counts +
     " && paste " + " ".join(htseq_counts) + " >> " + htseq_merged_counts
 )
+
+# run R analysis
+flag = join(htseq_dir, "analysis.R.flag")
+dm.add(flag, htseq_merged_counts, "Rscript analysis.R")
 
 dm.execute()
