@@ -1,0 +1,17 @@
+Neil Tube number	Pavitra Tube number	Time point	Sample	Repeat
+1	1	24 hr	Control	1
+2	2	24 hr	Control co-culture	1
+3	3	24 hr	Resistant	1
+4	4	24 hr	Resistant co-culture	1
+5	5	24 hr	Control	2
+6	6	24 hr	Control co-culture	2
+7	7	24 hr	Resistant	2
+8	8	24 hr	Resistant co-culture	2
+9	10	120 hr	Control co-culture	1
+10	13	120 hr	Control	1
+11	15	120 hr	Resistant	1
+12	16	120 hr	Resistant co-culture	1
+13	17	120 hr	Control	2
+14	18	120 hr	Control co-culture	2
+15	19	120 hr	Resistant	2
+16	20	120 hr	Resistant co-culture	2

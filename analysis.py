@@ -55,13 +55,14 @@ def collate_fastqs_to_experimental_samples(fastqs):
                 star_bam_merged=None,
                 htseq_counts=None,
                 featureCounts_counts=None,
+                featureCounts_counts_simple=None,
             )
         )
     return exp_samples
 
 
 args = get_dm_arg_parser('RNA-seq analysis').parse_args()
-dm = DistributedMake(num_jobs=10, args_object=args)
+dm = DistributedMake(args_object=args, keep_going=True)
 
 activate_str = ". activate rna_seq_py27"
 
@@ -83,11 +84,17 @@ ensembl_annotations_with_chr = join(results_dir, "annotations", "ensembl",
                                     "Homo_sapiens.GRCh37.87.with_chr.gtf.gz")
 dm.add(ensembl_annotations_with_chr, ensembl_annotations,
        (
-           "zcat {}"
-           " | perl -pe 's/^([^#])/chr$1/'"
+           "gzip -dc {}"
+           " | perl -pe 's/^([^#])/chr$$1/'"
            " | perl -pe 's/^chrMT/chrM/'"
            " | pigz -c > {}"
        ).format(ensembl_annotations, ensembl_annotations_with_chr))
+
+# and provide an unzipped version
+ensembl_annotations_with_chr_no_zip = join(results_dir, "annotations", "ensembl",
+                                           "Homo_sapiens.GRCh37.87.with_chr.gtf")
+dm.add(ensembl_annotations_with_chr_no_zip, ensembl_annotations_with_chr,
+       "gzip -dc {} > {}".format(ensembl_annotations_with_chr, ensembl_annotations_with_chr_no_zip))
 
 # Let's first do some quality control
 fastqc_reports = []
@@ -150,59 +157,70 @@ exp_samples = collate_fastqs_to_experimental_samples(fastqs)
 for sample in exp_samples:
     star_bams = [f.star_bam for f in sample.fastqs]
     sample.star_bam_merged = join(alignment_dir, "star_by_experimental_sample", sample.name,
-                                  "merged.bam")
+                                  sample.name + ".bam")
+    merge_dir = dirname(sample.star_bam_merged)
     dm.add(
-        sample.star_bam_merged, star_bams,
-        " ".join(
-            [
-                "samtools merge -r",
-                sample.star_bam_merged,
-            ] + star_bams
-        )
+        sample.star_bam_merged, star_bams, ''.join([
+            "cd {}".format(merge_dir),
+            " && rm -rf {} && ".format(sample.star_bam_merged),
+            " && ".join(["ln -f -s {} {}".format(f.star_bam, f.fastq_sample + ".bam") for f in sample.fastqs]),
+            " && ",
+            "samtools merge -r {} *.bam".format(sample.star_bam_merged),
+            " && samtools index " + sample.star_bam_merged
+        ])
     )
 
-    # HT-seq - count reads on features
-    sample.htseq_counts = join(htseq_dir, sample.name, sample.name + ".counts")
-    dm.add(
-        sample.htseq_counts,
-        sample.star_bam_merged,
-        activate_str +
-        " && htseq-count --format bam --stranded no --quiet"
-        " {} <(zcat {}) > {}".format(sample.star_bam_merged,
-                                     ensembl_annotations_with_chr,
-                                     sample.htseq_counts)
-    )
+    # HT-seq - count reads on exons
+    # sample.htseq_counts = join(htseq_dir, sample.name, sample.name + ".counts")
+    # dm.add(
+    #     sample.htseq_counts,
+    #     [sample.star_bam_merged, ensembl_annotations_with_chr_no_zip],
+    #     activate_str +
+    #     " && htseq-count --format bam --stranded no --quiet"
+    #     " {} {} > {}".format(sample.star_bam_merged,
+    #                          ensembl_annotations_with_chr_no_zip,
+    #                          sample.htseq_counts)
+    # )
 
-    # try featureCounts - count reads on features
-    sample.featureCounts_counts = join(featureCounts_dir, sample.name, sample.name + ".counts")
+    # try featureCounts - count reads on exons
+    sample.featureCounts_counts = join(featureCounts_dir, sample.name, "exons", sample.name + ".exon.counts")
     dm.add(
         sample.featureCounts_counts,
-        sample.star_bam_merged,
+        [sample.star_bam_merged, ensembl_annotations_with_chr_no_zip],
         " featureCounts"
-        " -a <(zcat {}) -o {} {}".format(ensembl_annotations_with_chr,
-                                         sample.htseq_counts,
-                                         sample.star_bam_merged, )
+        " -t exon -g gene_id -a {} -o {} {}".format(ensembl_annotations_with_chr_no_zip,
+                                                    sample.featureCounts_counts,
+                                                    sample.star_bam_merged, )
+    )
+
+    # reformat counts to simpler format
+    sample.featureCounts_counts_simple = sample.featureCounts_counts + ".simple_counts"
+    dm.add(
+        sample.featureCounts_counts_simple,
+        sample.featureCounts_counts,
+        "grep -v '^#' {} | cut -f 1,7 > {}".format(sample.featureCounts_counts, sample.featureCounts_counts_simple)
     )
 
 sample_multiqc_report = join(results_dir, "multiqc_per_experimental_sample", "multiqc_report.html")
 dm.add(sample_multiqc_report,
-       chain(*[(s.htseq_counts, s.featureCounts_counts) for s in exp_samples]),
-       "multiqc -d -dd 1 -f --outdir {} {} {}".format(dirname(sample_multiqc_report), htseq_dir,
-                                                      featureCounts_dir))
+       chain(*[(s.featureCounts_counts,) for s in exp_samples]),
+       "multiqc -f --outdir {} {} {}".format(dirname(sample_multiqc_report), htseq_dir,
+                                             featureCounts_dir))
 
 # collate counts into one csv
 exp_samples = sorted(exp_samples, key=lambda x: x.name)
-htseq_counts = [s.htseq_counts for s in exp_samples]
-htseq_merged_counts = join(htseq_dir, "all_sample_counts.csv")
+fc_counts = [s.featureCounts_counts_simple for s in exp_samples]
+fc_merged_counts = join(featureCounts_dir, "all_sample_counts.csv")
+assert len(fc_counts) >= 2
 dm.add(
-    htseq_merged_counts, htseq_counts,
-    "echo -e 'Feature\t" +
-    "\t".join([s.name for s in exp_samples]) + "' > " + htseq_merged_counts +
-    " && paste " + " ".join(htseq_counts) + " >> " + htseq_merged_counts
+    fc_merged_counts, fc_counts,
+    "rm -f {}".format(fc_merged_counts) +
+    " && join {} {}".format(*fc_counts[0:2]) + "".join(
+        [" | join - " + f for f in fc_counts[2:]]) + " >> " + fc_merged_counts
 )
 
 # run R analysis
 flag = join(htseq_dir, "analysis.R.flag")
-dm.add(flag, htseq_merged_counts, "Rscript analysis.R")
+# dm.add(flag, htseq_merged_counts, "Rscript analysis.R")
 
 dm.execute()
