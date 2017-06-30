@@ -10,15 +10,23 @@ counts = read.table("results/featureCounts/all_sample_counts.csv", sep = " ", ro
 names(counts) = gsub('\\.\\d+\\.bam', '', gsub('.*PAV', 'PAV', names(counts)))
 head(counts)
 
+# read in sample metadata
+metadata = read.table("data/sample_meta_data.tsv", sep="\t", header=TRUE)
+
 cbPalette = c("#999999", "#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
 sample.def = names(counts)
 colors = rep(cbPalette, each = 2)
 # need to scale because sample 1 has higher coverage
 myPca <- prcomp(t(scale(log2(counts + 1))))
 
+# Adding metadata
+pcs = as.data.frame(myPca$x)
+pcs$Pavitra.Tube.number = as.numeric(gsub("PAV", "", rownames(pcs)))
+pcs = merge(metadata, pcs, by="Pavitra.Tube.number")
+
 # first two principle components
 library(ggplot2)
-g = ggplot(aes(x=PC1, y=PC2), data=as.data.frame(myPca$x)) + geom_point()
+g = ggplot(aes(x=PC1, y=PC2, color=Sample, shape=Time.point), data=pcs) + geom_point()
 ggsave(file.path(output_dir, 'pca_plot.ggplot.pdf'))
 
 # pdf(file.path(output_dir, 'pca_plot.pdf'))
