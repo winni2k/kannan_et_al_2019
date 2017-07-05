@@ -79,6 +79,9 @@ alignment_dir = join(results_dir, "alignment")
 htseq_dir = join(results_dir, "htseq")
 featureCounts_dir = join(results_dir, "featureCounts")
 
+# create a new STAR index from GRCh37
+# dm.add()
+
 # Pre-processing of the gtf file
 ensembl_annotations_with_chr = join(results_dir, "annotations", "ensembl",
                                     "Homo_sapiens.GRCh37.87.with_chr.gtf.gz")
