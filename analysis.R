@@ -10,6 +10,7 @@
 # install.packages("org.Hs.eg.db", repos="http://bioconductor.org/packages/3.5/data/annotation")
 # biocLite("KEGGREST")
 # biocLite("clusterProfiler")
+# install.packages('UpSetR')
 library(org.Hs.eg.db)
 library(DESeq2)
 library(ggplot2)
@@ -19,6 +20,8 @@ library(clusterProfiler)
 
 output_dir = file.path("results", "featureCounts", "r_analysis")
 go_term_enrichment_output_dir = file.path(output_dir, "go_term_enrichment")
+kegg_dir = file.path(output_dir, "kegg_analysis")
+dir.create(kegg_dir, showWarnings=FALSE)
 
 # read in the data
 cts = read.table("results/featureCounts/all_sample_counts.csv", sep = " ", row.names = 1, header = TRUE)
@@ -183,10 +186,13 @@ convert_to_enrichment_map_gen_enrich_res_format = function(goseq_result){
     )
     return(enrich_df)
 }
-{
-    q1 = questions$q1
-    genes = as.integer(rownames(q1$res) %in% rownames(q1$res_fdr_pc10))
-    names(genes) = rownames(q1$res)
+for(q in questions){
+    print(q$design)
+    if(nrow(q$res_fdr_pc10) < 2){
+        next
+    }
+    genes = as.integer(rownames(q$res) %in% rownames(q$res_fdr_pc10))
+    names(genes) = rownames(q$res)
     gene_lengths = all_gene_lengths
     gene_lengths = gene_lengths[names(all_gene_lengths) %in% names(genes)]
     gene_lengths[match(names(gene_lengths), names(genes))]
@@ -196,32 +202,37 @@ convert_to_enrichment_map_gen_enrich_res_format = function(goseq_result){
     kegg.wall = goseq(pwf, "hg38", "ensGene", test.cats = c("KEGG"))
     em_enrichment = convert_to_enrichment_map_gen_enrich_res_format(GO.wall)
 
-    em_kegg_enrichment = convert_to_enrichment_map_gen_enrich_res_format(kegg.wall)
-    em_kegg_enrichment$kegg.id = sub("^", "hsa", as.character(em_kegg_enrichment$GO.ID))
-
-    kegg_objects = list()
-    for (i in seq(1, length(em_kegg_enrichment$kegg.id), by = 10)) {
-        print(i)
-        kegg_objects = append(kegg_objects, keggGet(em_kegg_enrichment$kegg.id[i : (i + 9)]))
-    }
-    print(length(kegg_objects))
-    em_kegg_enrichment$kegg.names = unlist(ids)
-
-    cp_kegg.wall = convert_to_cluster_profiler_format(kegg.wall, kegg_objects)
-
-    # let's try complete clusterProfiler KEGG analysis
-    eg = bitr(rownames(q1$res_fdr_pc10), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
-    # Lost 0.13% of genes
-    kk <- enrichKEGG(gene = eg$ENTREZID,
-    organism = 'hsa',
-    pvalueCutoff = 0.05)
-
-
     write.table(
     em_enrichment,
-    file = file.path(go_term_enrichment_output_dir, paste(paste(q1$design, collapse = "-"), "de", "go-term-enrichment", "tsv", sep = ".")),
+    file = file.path(go_term_enrichment_output_dir, paste(paste(q$design, collapse = "-"), "de", "go-term-enrichment", "tsv", sep = ".")),
     sep = "\t",
     quote = FALSE,
     row.names = FALSE
     )
+
+    em_kegg_enrichment = convert_to_enrichment_map_gen_enrich_res_format(kegg.wall)
+    em_kegg_enrichment$kegg.id = sub("^", "hsa", as.character(em_kegg_enrichment$GO.ID))
+
+    # let's try complete clusterProfiler KEGG analysis
+    eg = select(org.Hs.eg.db, keys=rownames(q$res_fdr_pc10), columns=c("ENTREZID"), keytype="ENSEMBL")
+    eg = eg[!duplicated(eg$ENTREZID), ]
+
+    kk <- enrichKEGG(gene = eg$ENTREZID,
+    organism = 'hsa',
+    pvalueCutoff = 0.005)
+    geneList = q$res_fdr_pc10$log2FoldChange
+    names(geneList) = rownames(q$res_fdr_pc10)
+    geneList = geneList[names(geneList) %in% eg$ENSEMBL]
+    names(geneList) = eg$ENTREZID[match(names(geneList), eg$ENSEMBL)]
+
+    design_str = paste(q$design, collapse="-")
+
+    pdf(file.path(kegg_dir, paste0(design_str, ".cnetplot.pdf")), width = 30, height = 30)
+    cnetplot(kk, showCategory=8, categorySize="pvalue", foldChange=geneList)
+    dev.off()
+
+    pdf(file.path(kegg_dir, paste0(design_str,".upsetplot.pdf")))
+    upsetplot(kk)
+    dev.off()
+
 }
