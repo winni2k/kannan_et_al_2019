@@ -4,3 +4,4 @@ star
 samtools
 pigz
 subread
+bedops

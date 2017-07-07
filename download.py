@@ -1,5 +1,6 @@
-from os.path import join
+from os.path import join, basename
 from shlex import quote
+from urllib.parse import urlparse
 
 from dmpy.distributedmake import DistributedMake, get_dm_arg_parser
 
@@ -21,6 +22,10 @@ class Downloader(object):
         command = "curl {} -o {}".format(quote(url), quote(output))
         self.dm.add(output, None, command)
 
+    def get_file_to_dir(self, url, output_dir):
+        output = join(output_dir, basename(urlparse(url).path))
+        self.get_file(url, output)
+
 
 args = get_dm_arg_parser('RNA-seq analysis').parse_args()
 dm = DistributedMake(args_object=args)
@@ -34,16 +39,21 @@ down.get_dir(
     "https://export.uppmax.uu.se/b2013006/downloads/courses/RNAseqWorkshop/QC/annotation/",
     "data/QC/annotation")
 
-down.get_file(
+down.get_file_to_dir(
     'ftp://ftp.ensembl.org/pub/release-89/gtf/homo_sapiens/Homo_sapiens.GRCh38.89.gtf.gz',
-    "data/annotations/ensembl/Homo_sapiens.GRCh37.89.gtf.gz"
+    "data/annotations/ensembl"
 )
 
-down.get_file(
-    'ftp://ftp.ensembl.org/pub/release-89/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.toplevel.fa.gz',
-    'data/reference/ensembl/Homo_sapiens.GRCh38.dna.toplevel.fa.gz'
+down.get_file_to_dir(
+    'ftp://ftp.ensembl.org/pub/release-89/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz',
+    'data/reference/ensembl'
 )
+
+down.get_file_to_dir(
+    'http://download.baderlab.org/EM_Genesets/current_release/Human/symbol/GO/Human_GOALL_with_GO_iea_June_01_2017_symbol.gmt',
+    'data/gene_sets'
+)
+
 # 2017-07-01 downloaded from email from pavitra: data/sample_meta_data.tsv
-
 
 dm.execute()

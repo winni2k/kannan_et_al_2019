@@ -3,12 +3,22 @@
 # Created by: winni
 # Created on: 6/23/17
 
-source("http://bioconductor.org/biocLite.R")
-biocLite("DESeq2")
+# source("http://bioconductor.org/biocLite.R")
+# biocLite("DESeq2")
+# biocLite("goseq")
+# biocLite("TxDb.Hsapiens.UCSC.hg38.knownGene")
+# install.packages("org.Hs.eg.db", repos="http://bioconductor.org/packages/3.5/data/annotation")
+# biocLite("KEGGREST")
+# biocLite("clusterProfiler")
+library(org.Hs.eg.db)
 library(DESeq2)
 library(ggplot2)
+library(goseq)
+library(KEGGREST)
+library(clusterProfiler)
 
 output_dir = file.path("results", "featureCounts", "r_analysis")
+go_term_enrichment_output_dir = file.path(output_dir, "go_term_enrichment")
 
 # read in the data
 cts = read.table("results/featureCounts/all_sample_counts.csv", sep = " ", row.names = 1, header = TRUE)
@@ -70,7 +80,7 @@ ggsave(file.path(output_dir, 'pca_plot.ggplot.pdf'))
 # same thing for reg log
 pcs.rld = merge(coldata, as.data.frame(myPCA.rld$x), by = "row.names", sort = FALSE)
 g = ggplot(aes(x = PC1, y = PC2, color = Sample, shape = Time.point), data = pcs.rld) + geom_point()
-ggsave(file.path(output_dir, 'pca_plot.rld.ggplot.pdf'), width=5, height=5)
+ggsave(file.path(output_dir, 'pca_plot.rld.ggplot.pdf'), width = 5, height = 5)
 
 # pairwise correlations between samples
 data = list(log2 = log2(cts + 1), rld = assay(rld))
@@ -82,7 +92,7 @@ for (dat_name in c("log2", "rld")) {
     h = hclust(d, method = "ward.D2")
     dendro = as.dendrogram(h)
 
-    pdf(file.path(output_dir, paste(dat_name, 'correlation_heatmap.pdf', sep = ".")), height=6, width=6)
+    pdf(file.path(output_dir, paste(dat_name, 'correlation_heatmap.pdf', sep = ".")), height = 6, width = 6)
     heatmap(C, Colv = dendro, Rowv = dendro)
     dev.off()
 }
@@ -152,5 +162,66 @@ grid.newpage()
 grid.draw(v1)
 dev.off()
 
+# GO analysis
+gene_lengths = read.table("results/featureCounts/gene_lengths.tsv", header = FALSE, row.names = 1)
+tmp = gene_lengths[, 1]
+names(tmp) = rownames(gene_lengths)
+all_gene_lengths = tmp
+convert_to_enrichment_map_gen_enrich_res_format = function(goseq_result){
+    over_represented_pvalue_is_smaller = goseq_result$over_represented_pvalue < goseq_result$under_represented_pvalue
+    phenotype = ifelse(over_represented_pvalue_is_smaller, '+1', '-1')
+    pval = ifelse(over_represented_pvalue_is_smaller,
+    goseq_result$over_represented_pvalue,
+    goseq_result$under_represented_pvalue)
+
+    enrich_df = data.frame(
+    GO.ID = goseq_result$category,
+    Description = c(""),
+    p.val = pval,
+    FDR = c(""),
+    Phenotype = phenotype
+    )
+    return(enrich_df)
+}
+{
+    q1 = questions$q1
+    genes = as.integer(rownames(q1$res) %in% rownames(q1$res_fdr_pc10))
+    names(genes) = rownames(q1$res)
+    gene_lengths = all_gene_lengths
+    gene_lengths = gene_lengths[names(all_gene_lengths) %in% names(genes)]
+    gene_lengths[match(names(gene_lengths), names(genes))]
+    stopifnot(all(match(names(gene_lengths), names(genes)) == match(names(genes), names(gene_lengths))))
+    pwf = nullp(genes, bias.data = gene_lengths)
+    GO.wall = goseq(pwf, "hg38", "ensGene")
+    kegg.wall = goseq(pwf, "hg38", "ensGene", test.cats = c("KEGG"))
+    em_enrichment = convert_to_enrichment_map_gen_enrich_res_format(GO.wall)
+
+    em_kegg_enrichment = convert_to_enrichment_map_gen_enrich_res_format(kegg.wall)
+    em_kegg_enrichment$kegg.id = sub("^", "hsa", as.character(em_kegg_enrichment$GO.ID))
+
+    kegg_objects = list()
+    for (i in seq(1, length(em_kegg_enrichment$kegg.id), by = 10)) {
+        print(i)
+        kegg_objects = append(kegg_objects, keggGet(em_kegg_enrichment$kegg.id[i : (i + 9)]))
+    }
+    print(length(kegg_objects))
+    em_kegg_enrichment$kegg.names = unlist(ids)
+
+    cp_kegg.wall = convert_to_cluster_profiler_format(kegg.wall, kegg_objects)
+
+    # let's try complete clusterProfiler KEGG analysis
+    eg = bitr(rownames(q1$res_fdr_pc10), fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = "org.Hs.eg.db")
+    # Lost 0.13% of genes
+    kk <- enrichKEGG(gene = eg$ENTREZID,
+    organism = 'hsa',
+    pvalueCutoff = 0.05)
 
 
+    write.table(
+    em_enrichment,
+    file = file.path(go_term_enrichment_output_dir, paste(paste(q1$design, collapse = "-"), "de", "go-term-enrichment", "tsv", sep = ".")),
+    sep = "\t",
+    quote = FALSE,
+    row.names = FALSE
+    )
+}

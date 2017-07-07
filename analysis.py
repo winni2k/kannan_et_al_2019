@@ -23,6 +23,15 @@ class Messenger(FrozenClass):
         self._freeze()
 
 
+class DMWorker(object):
+    def __init__(self, dm):
+        self.dm = dm
+
+    def unzip_to(self, zipped, unzipped):
+        self.dm.add(unzipped, zipped,
+                    "gzip -dc {} > {}".format(zipped, unzipped))
+
+
 def gather_fastq_info(rna_seq_dir):
     fastqs = []
     for sample_dir in os.listdir(rna_seq_dir):
@@ -61,16 +70,23 @@ def collate_fastqs_to_experimental_samples(fastqs):
     return exp_samples
 
 
+MAX_READ_LENGTH = 75
+MAPPING_THREADS = 4
+
 args = get_dm_arg_parser('RNA-seq analysis').parse_args()
 dm = DistributedMake(args_object=args, keep_going=True)
+dmw = DMWorker(dm)
 
 activate_str = ". activate rna_seq_py27"
 
 # This is the location where Kiran downloaded the FASTQ files to
 rna_seq_dir = abspath("data/AdHa160517-40613574")
-star_genome_dir = abspath("data/reference/hg19_Gencode14.overhangt75_star")
 genome_annotation_dir = abspath("data/QC/annotation")
-ensembl_annotations = abspath("data/annotations/ensembl/Homo_sapiens.GRCh37.87.gtf.gz")
+ensembl_annotations = abspath("data/annotations/ensembl/Homo_sapiens.GRCh38.89.gtf.gz")
+ensembl_reference = abspath("data/reference/ensembl/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz")
+refseq_reference = abspath("data/reference/refseq/GCF_000001405.36_GRCh38.p10_genomic.fna.gz")
+refseq_annotations = abspath("data/annotations/refseq/GCF_000001405.36_GRCh38.p10_genomic.gff.gz")
+go_terms = abspath("data/gene_sets/Human_GOALL_with_GO_iea_June_01_2017_symbol.gmt")
 
 results_dir = abspath("results")
 fastqc_dir = join(results_dir, "fastqc")
@@ -78,26 +94,42 @@ rseqc_dir = join(results_dir, "rseqc")
 alignment_dir = join(results_dir, "alignment")
 htseq_dir = join(results_dir, "htseq")
 featureCounts_dir = join(results_dir, "featureCounts")
+ensembl_annot_dir = join(results_dir, "annotations", "ensembl")
+ensembl_ref_dir = join(results_dir, "reference", "ensembl")
+gene_set_dir = join(results_dir, "gene_sets")
+
+ensembl_reference_unzip = join(ensembl_ref_dir, "Homo_sapiens.GRCh38.dna.primary_assembly.fa")
+dmw.unzip_to(ensembl_reference, ensembl_reference_unzip)
+
+ensembl_annotations_unzip = join(ensembl_annot_dir, "Homo_sapiens.GRCh38.89.gtf")
+dm.add(ensembl_annotations_unzip, ensembl_annotations,
+       "gzip -dc {} > {}".format(ensembl_annotations, ensembl_annotations_unzip))
+
+ensembl_annotations_real_genes = join(ensembl_annot_dir,
+                                      "Homo_sapiens.GRCh38.89.protein_coding.gtf")
+dm.add(ensembl_annotations_real_genes, ensembl_annotations_unzip,
+       (' grep -e \'^#\' -e \'gene_biotype "protein_coding"\' {}'
+        ' > {}').format(ensembl_annotations_unzip, ensembl_annotations_real_genes)
+       )
 
 # create a new STAR index from GRCh37
-# dm.add()
-
-# Pre-processing of the gtf file
-ensembl_annotations_with_chr = join(results_dir, "annotations", "ensembl",
-                                    "Homo_sapiens.GRCh37.87.with_chr.gtf.gz")
-dm.add(ensembl_annotations_with_chr, ensembl_annotations,
+star_ref_flag = join(results_dir, "reference/GRCh38.89_star/flag")
+star_ref_dir = dirname(star_ref_flag)
+dm.add(star_ref_flag, [ensembl_reference_unzip, ensembl_annotations],
        (
-           "gzip -dc {}"
-           " | perl -pe 's/^([^#])/chr$$1/'"
-           " | perl -pe 's/^chrMT/chrM/'"
-           " | pigz -c > {}"
-       ).format(ensembl_annotations, ensembl_annotations_with_chr))
-
-# and provide an unzipped version
-ensembl_annotations_with_chr_no_zip = join(results_dir, "annotations", "ensembl",
-                                           "Homo_sapiens.GRCh37.87.with_chr.gtf")
-dm.add(ensembl_annotations_with_chr_no_zip, ensembl_annotations_with_chr,
-       "gzip -dc {} > {}".format(ensembl_annotations_with_chr, ensembl_annotations_with_chr_no_zip))
+           'STAR'
+           ' --runThreadN 32'
+           ' --runMode genomeGenerate'
+           ' --genomeDir {0}'
+           ' --genomeFastaFiles {1}'
+           ' --sjdbGTFfile {2}'
+           ' --sjdbOverhang {3}'
+           ' && touch {4}'
+       ).format(star_ref_dir,
+                ensembl_reference_unzip,
+                ensembl_annotations_unzip,
+                MAX_READ_LENGTH - 1,
+                star_ref_flag))
 
 # Let's first do some quality control
 fastqc_reports = []
@@ -110,11 +142,6 @@ for fastq in fastqs:
     dm.add(fastq.fastqc_report, fastq.fastq,
            "fastqc --outdir {} {}".format(out_dir, fastq.fastq))
 
-
-def extract_experimental_sample(fastq):
-    return fastq.experimental_sample
-
-
 # Let's map the reads using hisat2 - oh wait hisat2 quality sucks
 # STAR it is.
 for fastq in fastqs:
@@ -123,11 +150,11 @@ for fastq in fastqs:
     out_dir = dirname(fastq.star_bam)
     dm.add(
         fastq.star_bam,
-        fastq.fastq,
+        [fastq.fastq, star_ref_flag],
         " ".join(
             [
-                "STAR --runThreadN 2 --outSAMstrandField intronMotif",
-                "--genomeDir", star_genome_dir,
+                "STAR --runThreadN {} --outSAMstrandField intronMotif".format(MAPPING_THREADS),
+                "--genomeDir", star_ref_dir,
                 "--readFilesIn", fastq.fastq,
                 "--outFileNamePrefix {}/".format(out_dir),
                 "--outSAMtype", "BAM", "SortedByCoordinate",
@@ -138,22 +165,11 @@ for fastq in fastqs:
     fastq.star_bam_bai = fastq.star_bam + ".bai"
     dm.add(fastq.star_bam_bai, fastq.star_bam, "samtools index " + fastq.star_bam)
 
-    # Let's run some rseqc
-    ref_seq_bed = join(genome_annotation_dir, "hg19_RefSeq.bed")
-    fastq.read_dist_report = join(rseqc_dir, fastq.fastq_sample, "read_distribution.txt")
-    dm.add(
-        fastq.read_dist_report,
-        [fastq.star_bam, ref_seq_bed],
-        "{} && read_distribution.py -i {} -r {} > {}".format(activate_str, fastq.star_bam,
-                                                             ref_seq_bed, fastq.read_dist_report)
-    )
-
 # QC summary
 multiqc_report = join(results_dir, "multiqc", "multiqc_report.html")
-dm.add(multiqc_report, chain(*[(f.fastqc_report, f.star_bam, f.read_dist_report) for f in fastqs]),
-       "multiqc -d -dd 1 -f --outdir {} {} {} {}".format(dirname(multiqc_report), fastqc_dir,
-                                                         alignment_dir,
-                                                         rseqc_dir))
+dm.add(multiqc_report, chain(*[(f.fastqc_report, f.star_bam) for f in fastqs]),
+       "multiqc -d -dd 1 -f --outdir {} {} {}".format(dirname(multiqc_report), fastqc_dir,
+                                                      alignment_dir))
 
 # combine experimental samples
 exp_samples = collate_fastqs_to_experimental_samples(fastqs)
@@ -166,34 +182,24 @@ for sample in exp_samples:
         sample.star_bam_merged, star_bams, ''.join([
             "cd {}".format(merge_dir),
             " && rm -rf {} && ".format(sample.star_bam_merged),
-            " && ".join(["ln -f -s {} {}".format(f.star_bam, f.fastq_sample + ".bam") for f in sample.fastqs]),
+            " && ".join(["ln -f -s {} {}".format(f.star_bam, f.fastq_sample + ".bam") for f in
+                         sample.fastqs]),
             " && ",
             "samtools merge -r {} *.bam".format(sample.star_bam_merged),
             " && samtools index " + sample.star_bam_merged
         ])
     )
 
-    # HT-seq - count reads on exons
-    # sample.htseq_counts = join(htseq_dir, sample.name, sample.name + ".counts")
-    # dm.add(
-    #     sample.htseq_counts,
-    #     [sample.star_bam_merged, ensembl_annotations_with_chr_no_zip],
-    #     activate_str +
-    #     " && htseq-count --format bam --stranded no --quiet"
-    #     " {} {} > {}".format(sample.star_bam_merged,
-    #                          ensembl_annotations_with_chr_no_zip,
-    #                          sample.htseq_counts)
-    # )
-
     # try featureCounts - count reads on exons
-    sample.featureCounts_counts = join(featureCounts_dir, sample.name, "exons", sample.name + ".exon.counts")
+    sample.featureCounts_counts = join(featureCounts_dir, sample.name, "exons",
+                                       sample.name + ".exon.counts")
     dm.add(
         sample.featureCounts_counts,
-        [sample.star_bam_merged, ensembl_annotations_with_chr_no_zip],
+        [sample.star_bam_merged, ensembl_annotations_real_genes],
         " featureCounts"
-        " -t exon -g gene_id -a {} -o {} {}".format(ensembl_annotations_with_chr_no_zip,
-                                                    sample.featureCounts_counts,
-                                                    sample.star_bam_merged, )
+        " -t exon -F GTF -g gene_id -a {} -o {} {}".format(ensembl_annotations_real_genes,
+                                                           sample.featureCounts_counts,
+                                                           sample.star_bam_merged, )
     )
 
     # reformat counts to simpler format
@@ -201,7 +207,8 @@ for sample in exp_samples:
     dm.add(
         sample.featureCounts_counts_simple,
         sample.featureCounts_counts,
-        "grep -v '^#' {} | cut -f 1,7 > {}".format(sample.featureCounts_counts, sample.featureCounts_counts_simple)
+        "grep -v '^#' {} | cut -f 1,7 > {}".format(sample.featureCounts_counts,
+                                                   sample.featureCounts_counts_simple)
     )
 
 sample_multiqc_report = join(results_dir, "multiqc_per_experimental_sample", "multiqc_report.html")
@@ -209,6 +216,14 @@ dm.add(sample_multiqc_report,
        chain(*[(s.featureCounts_counts,) for s in exp_samples]),
        "multiqc -f --outdir {} {} {}".format(dirname(sample_multiqc_report), htseq_dir,
                                              featureCounts_dir))
+
+# calculate gene lengths
+fc_gene_lengths = join(featureCounts_dir, "gene_lengths.tsv")
+dm.add(fc_gene_lengths, exp_samples[0].featureCounts_counts,
+       ("grep '^ENSG' {}"
+        " | cut -f1,3,4"
+        " | perl -ane 'print $$F[0] . \"\\t\" . ($$F[2] - $$F[1]) . \"\\n\"' > {} ").format(
+           exp_samples[0].featureCounts_counts, fc_gene_lengths))
 
 # collate counts into one csv
 exp_samples = sorted(exp_samples, key=lambda x: x.name)
@@ -221,6 +236,12 @@ dm.add(
     " && join {} {}".format(*fc_counts[0:2]) + "".join(
         [" | join - " + f for f in fc_counts[2:]]) + " >> " + fc_merged_counts
 )
+
+# convert go terms to go id only
+go_terms_only_symbols = join(gene_set_dir,
+                             "Human_GOALL_with_GO_iea_June_01_2017_symbol.gmt")
+dm.add(go_terms_only_symbols, go_terms,
+       "perl -pe 's/.*\%//' < {} > {}".format(go_terms, go_terms_only_symbols))
 
 # run R analysis
 flag = join(htseq_dir, "analysis.R.flag")
