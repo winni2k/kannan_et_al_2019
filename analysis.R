@@ -220,7 +220,7 @@ for(q in questions){
     kk <- enrichKEGG(gene = eg$ENTREZID,
     organism = 'hsa',
     pvalueCutoff = 0.005)
-    geneList = q$res_fdr_pc10$log2FoldChange
+    geneList = q$res_fdr_pc10$stat
     names(geneList) = rownames(q$res_fdr_pc10)
     geneList = geneList[names(geneList) %in% eg$ENSEMBL]
     names(geneList) = eg$ENTREZID[match(names(geneList), eg$ENSEMBL)]
