@@ -1,4 +1,5 @@
 fastqc
+picard
 multiqc
 star
 samtools
