@@ -13,6 +13,13 @@ pip install git+git://github.com/kvg/dmpy.git
 pip install --requirement requirements-py27.txt
 . activate rna_seq
 
+# manually download gatk and register it
+mkdir -p opt
+if [ ! -f opt/*/GenomeAnalysisTK.jar ]; then
+    curl https://software.broadinstitute.org/gatk/download/auth?package=GATK | tar -xjf - -C opt
+fi
+gatk-register opt/*/GenomeAnalysisTK.jar
+
 
 # link data
 pushd data

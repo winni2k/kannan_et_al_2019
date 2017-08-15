@@ -2,6 +2,7 @@ import os
 from tempfile import TemporaryDirectory
 from itertools import chain, groupby
 from os.path import abspath, join, basename, dirname
+import attr
 
 from dmpy.distributedmake import DistributedMake, get_dm_arg_parser
 
@@ -24,15 +25,26 @@ class Messenger(FrozenClass):
         self._freeze()
 
 
+@attr.s
+class GenomeReference(object):
+    fasta = attr.ib()
+    index = attr.ib()
+    ref_dict = attr.ib()
+
+
+@attr.s
 class DMWorker(object):
-    def __init__(self, dm, global_tmpdir):
-        self.dm = dm
-        self.tmpdir = TemporaryDirectory(dir=global_tmpdir)
+    dm = attr.ib()
+    global_tmpdir = attr.ib()
+    tmpdir = attr.ib(init=False)
+
+    def __attrs_post_init__(self):
+        self.tmpdir = TemporaryDirectory(dir=self.global_tmpdir)
 
     def cleanup(self):
         self.tmpdir.cleanup()
 
-    def unzip_to(self, zipped, unzipped):
+    def unzip_to(self, unzipped, zipped):
         self.dm.add(unzipped, zipped,
                     "gzip -dc {} > {}".format(zipped, unzipped))
 
@@ -51,14 +63,17 @@ class DMWorker(object):
                      ).format(fastq.star_bam, bam_with_rg, fastq.experimental_sample))
         return bam_with_rg
 
-    def mark_duplicates(self, dedupped_bam, bam):
-        self.dm.add(dedupped_bam, bam, (
+    def mark_duplicates(self, dedupped_bam, bam, remove_duplicates=False):
+        command = (
             "picard MarkDuplicates"
             " I={} O={}"
             " CREATE_INDEX=true"
             " VALIDATION_STRINGENCY=SILENT"
             " M=output.metrics"
-        ).format(bam, dedupped_bam))
+        ).format(bam, dedupped_bam)
+        if remove_duplicates:
+            command += " REMOVE_DUPLICATES=true"
+        self.dm.add(dedupped_bam, bam, command)
 
     def merge_bams(self, merged_bam, bams, add_read_group=False):
         if add_read_group:
@@ -84,6 +99,34 @@ class DMWorker(object):
         commands.append(" && samtools index " + merged_bam)
 
         self.dm.add(merged_bam, bams, ''.join(commands))
+
+    def split_n_trim(self, trimmed_bam, input_bam, genome_reference_object):
+        self.dm.add(trimmed_bam,
+                    [input_bam, genome_reference_object.index, genome_reference_object.ref_dict],
+                    (
+                        "gatk -Xmx10g"
+                        " -T SplitNCigarReads "
+                        "-R {} -I {} -o {} "
+                        "-rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 "
+                        "-U ALLOW_N_CIGAR_READS"
+                    ).format(genome_reference_object.fasta, input_bam, trimmed_bam))
+
+    def index_fasta(self, fasta):
+        index = fasta + ".fai"
+        self.dm.add(index, fasta, "samtools faidx {}".format(fasta))
+        return index
+
+    def index_fasta_for_broad(self, ensembl_reference_unzip):
+        index = self.index_fasta(ensembl_reference_unzip)
+        ref_dict = self.dict_fasta(ensembl_reference_unzip)
+        return GenomeReference(fasta=ensembl_reference_unzip, index=index, ref_dict=ref_dict)
+
+    def dict_fasta(self, unzipped_reference):
+        ref_dict = unzipped_reference.rsplit('.fa')[0] + '.dict'
+        self.dm.add(ref_dict, unzipped_reference,
+                    "picard CreateSequenceDictionary R={} O={}".format(unzipped_reference,
+                                                                       ref_dict))
+        return ref_dict
 
 
 def gather_fastq_info(rna_seq_dir):
@@ -119,6 +162,7 @@ def collate_fastqs_to_experimental_samples(fastqs):
                 star_bam_merged=None,
                 star_bam_with_rg_merged=None,
                 star_bam_with_rg_merged_dedupped=None,
+                star_bam_with_rg_merged_dedupped_snt=None,
                 htseq_counts=None,
                 featureCounts_counts=None,
                 featureCounts_counts_simple=None,
@@ -161,7 +205,8 @@ def main():
     dmw = DMWorker(dm, GLOBAL_TMPDIR)
 
     ensembl_reference_unzip = join(ENSEMBL_REF_DIR, "Homo_sapiens.GRCh38.dna.primary_assembly.fa")
-    dmw.unzip_to(ENSEMBL_REFERENCE, ensembl_reference_unzip)
+    dmw.unzip_to(ensembl_reference_unzip, ENSEMBL_REFERENCE)
+    ensembl_reference_object = dmw.index_fasta_for_broad(ensembl_reference_unzip)
 
     ensembl_annotations_unzip = join(ENSEMBL_ANNOT_DIR, "Homo_sapiens.GRCh38.89.gtf")
     dm.add(ensembl_annotations_unzip, ENSEMBL_ANNOTATIONS,
@@ -229,7 +274,7 @@ def main():
 
     exp_samples = collate_fastqs_to_experimental_samples(fastqs)
 
-    perform_variant_calling(dmw, fastqs, exp_samples)
+    perform_broad_variant_calling(dmw, fastqs, exp_samples, ensembl_reference_object)
 
     # QC summary
     multiqc_report = join(RESULTS_DIR, "multiqc", "multiqc_report.html")
@@ -306,7 +351,14 @@ def main():
     dmw.cleanup()
 
 
-def perform_variant_calling(dmw, fastqs, experimental_samples):
+def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_reference_object):
+    """Broad pipeline for variant calling on RNA-seq data
+
+    This analysis broadly follows GATK best practices as defined at
+    https://software.broadinstitute.org/gatk/documentation/article.php?id=3891,
+    retrieved 2017-08-14
+    """
+
     for fastq in fastqs:
         fastq.star_bam_with_rg = fastq.star_bam.rpartition('.bam')[0] + '.with_rg.bam'
         dmw.add_read_groups(fastq.star_bam_with_rg, fastq)
@@ -320,7 +372,15 @@ def perform_variant_calling(dmw, fastqs, experimental_samples):
 
         sample.star_bam_with_rg_merged_dedupped = \
             sample.star_bam_with_rg_merged.rpartition('.bam')[0] + '.dedup.bam'
-        dmw.mark_duplicates(sample.star_bam_with_rg_merged_dedupped, sample.star_bam_with_rg_merged)
+        dmw.mark_duplicates(sample.star_bam_with_rg_merged_dedupped,
+                            sample.star_bam_with_rg_merged,
+                            remove_duplicates=True)
+
+        sample.star_bam_with_rg_merged_dedupped_snt = \
+            sample.star_bam_with_rg_merged_dedupped.rpartition('.bam')[0] + '.snt.bam'
+        dmw.split_n_trim(sample.star_bam_with_rg_merged_dedupped_snt,
+                         sample.star_bam_with_rg_merged_dedupped,
+                         genome_reference_object)
 
 
 if __name__ == '__main__':

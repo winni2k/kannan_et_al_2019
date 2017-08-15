@@ -1,3 +1,4 @@
+attrs
 fastqc
 picard
 multiqc
@@ -6,3 +7,4 @@ samtools
 pigz
 subread
 bedops
+gatk
