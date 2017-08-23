@@ -54,6 +54,17 @@ down.get_file_to_dir(
     'data/gene_sets'
 )
 
-# 2017-07-01 downloaded from email from pavitra: data/sample_meta_data.tsv
+broad_bundle_urls = [
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz',
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz.tbi',
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz',
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz.tbi',
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/dbsnp_146.hg38.vcf.gz',
+    'ftp://gsapubftp-anonymous@ftp.broadinstitute.org/bundle/hg38/dbsnp_146.hg38.vcf.gz.tbi',
+]
+for url in broad_bundle_urls:
+    down.get_file_to_dir(url, 'data/broad/bundle/hg38')
 
 dm.execute()
+
+# 2017-07-01 downloaded from email from pavitra: data/sample_meta_data.tsv

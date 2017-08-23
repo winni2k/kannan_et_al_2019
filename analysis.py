@@ -1,28 +1,12 @@
 import os
+from enum import Enum
 from tempfile import TemporaryDirectory
 from itertools import chain, groupby
-from os.path import abspath, join, basename, dirname
+from os.path import abspath, join, basename, dirname, splitext
 import attr
+from functools import wraps
 
 from dmpy.distributedmake import DistributedMake, get_dm_arg_parser
-
-
-class FrozenClass(object):
-    __isfrozen = False
-
-    def __setattr__(self, key, value):
-        if self.__isfrozen and not hasattr(self, key):
-            raise TypeError("Cannot set {}: {} is a frozen class".format(key, self))
-        object.__setattr__(self, key, value)
-
-    def _freeze(self):
-        self.__isfrozen = True
-
-
-class Messenger(FrozenClass):
-    def __init__(self, **kwargs):
-        self.__dict__ = kwargs
-        self._freeze()
 
 
 @attr.s
@@ -30,6 +14,13 @@ class GenomeReference(object):
     fasta = attr.ib()
     index = attr.ib()
     ref_dict = attr.ib()
+
+
+class VCFType(Enum):
+    vcf_compressed = ("z",)
+
+    def __init__(self, bcftools_cli_flag):
+        self.bcftools_cli_flag = bcftools_cli_flag
 
 
 @attr.s
@@ -122,11 +113,118 @@ class DMWorker(object):
         return GenomeReference(fasta=ensembl_reference_unzip, index=index, ref_dict=ref_dict)
 
     def dict_fasta(self, unzipped_reference):
-        ref_dict = unzipped_reference.rsplit('.fa')[0] + '.dict'
+        ref_dict = splitext(unzipped_reference)[0] + '.dict'
         self.dm.add(ref_dict, unzipped_reference,
                     "picard CreateSequenceDictionary R={} O={}".format(unzipped_reference,
                                                                        ref_dict))
         return ref_dict
+
+    def bqsr(self, output_bam, input_bam, known_sites, ref_fasta):
+        recal_dir = output_bam + "_data"
+        recal_table = join(recal_dir, "recal_data.table")
+        post_recal_table = join(recal_dir, "post_recal_data.table")
+        recal_plots = join(recal_dir, 'recal_comparison.pdf')
+
+        self.bqsr_generate_recal_table(recal_table, input_bam, known_sites, ref_fasta)
+        self.bqsr_generate_post_recal_table(post_recal_table, input_bam, recal_table, known_sites,
+                                            ref_fasta)
+        self.bqsr_generate_recal_plots(recal_plots, recal_table, post_recal_table, ref_fasta)
+        self.bqsr_apply_recal_table(output_bam, input_bam, recal_table, known_sites, ref_fasta)
+
+    def bqsr_generate_recal_table(self, output_table, input_bam, known_sites, ref_fasta):
+        if isinstance(known_sites, str):
+            known_sites = [known_sites]
+        command = (
+            'gatk -T BaseRecalibrator'
+            ' -R {}'
+            ' -I {}'
+            ' -o {}'
+        ).format(ref_fasta, input_bam, output_table)
+        for known_sites_file in known_sites:
+            command += ' -knownSites {}'.format(known_sites_file)
+        self.dm.add(output_table, known_sites + [input_bam], command)
+
+    def bqsr_generate_post_recal_table(self, output_table, input_bam, input_table, known_sites,
+                                       ref_fasta):
+        if isinstance(known_sites, str):
+            known_sites = [known_sites]
+        command = (
+            'gatk -T BaseRecalibrator'
+            ' -R {}'
+            ' -I {}'
+            ' -BQSR {}'
+            ' -o {}'
+        ).format(ref_fasta, input_bam, input_table, output_table)
+        for known_sites_file in known_sites:
+            command += ' -knownSites {}'.format(known_sites_file)
+        self.dm.add(output_table, known_sites + [input_bam, input_table], command)
+
+    def bqsr_generate_recal_plots(self, output_plots, before_table, after_table, ref_fasta):
+        command = (
+            'gatk -T AnalyzeCovariates'
+            ' -R {}'
+            ' -before {}'
+            ' -after {}'
+            ' -plots {}'
+        ).format(ref_fasta, before_table, after_table, output_plots)
+        self.dm.add(output_plots, [before_table, after_table], command)
+
+    def bqsr_apply_recal_table(self, output_bam, input_bam, recal_table, known_sites, ref_fasta):
+        if isinstance(known_sites, str):
+            known_sites = [known_sites]
+        command = (
+            'gatk -T PrintReads'
+            ' -R {}'
+            ' -I {}'
+            ' -o {}'
+            ' -BQSR {}'
+        ).format(ref_fasta, input_bam, output_bam, recal_table)
+        self.dm.add(output_bam, known_sites + [recal_table, input_bam], command)
+
+    def call_variants(self, output_vcf, input_bam, ref_fasta):
+        command = ('gatk -T HaplotypeCaller'
+                   ' -R {}'
+                   ' -I {}'
+                   ' -dontUseSoftClippedBases'
+                   ' -stand_call_conf 20.0'
+                   ' -o {}').format(ref_fasta, input_bam, output_vcf)
+        self.dm.add(output_vcf, [input_bam, ref_fasta], command)
+
+    def set_variant_filters(self, output_vcf, input_vcf, ref_fasta,
+                            filters=""):
+        command = ("gatk -T VariantFiltration"
+                   " -R {}"
+                   " -V {}"
+                   ' -o {}').format(ref_fasta, input_vcf, output_vcf)
+        command += filters
+        self.dm.add(output_vcf, input_vcf, command)
+
+    def apply_variant_filters(self, output_vcf, input_vcf, filters=None,
+                              output_type=VCFType.vcf_compressed):
+        if filters is None:
+            filters = ['.', 'PASS']
+        command = "bcftools view {} -o {} -O {}".format(input_vcf, output_vcf,
+                                                        output_type.bcftools_cli_flag)
+        command += ' -f ' + ','.join(filters)
+        self.dm.add(output_vcf, input_vcf, command)
+
+    def bcftools_stats(self, input_vcf, output_file=None):
+        if output_file is None:
+            output_file = input_vcf + '.stats'
+        command = 'bcftools stats {} > {}'.format(input_vcf, output_file)
+        self.dm.add(output_file, input_vcf, command)
+
+
+@attr.s(slots=True)
+class FastqMessenger(object):
+    fastq = attr.ib()
+    fastq_sample = attr.ib()
+    experimental_sample = attr.ib()
+    fastqc_report = attr.ib(default=None)
+    star_bam = attr.ib(default=None)
+    star_bam_bai = attr.ib(default=None)
+    star_bam_with_rg = attr.ib(default=None)
+    read_dist_report = attr.ib(default=None)
 
 
 def gather_fastq_info(rna_seq_dir):
@@ -134,20 +232,31 @@ def gather_fastq_info(rna_seq_dir):
     for sample_dir in os.listdir(rna_seq_dir):
         for fastq in os.listdir(join(rna_seq_dir, sample_dir)):
             fastq_full_path = join(rna_seq_dir, sample_dir, fastq)
-            fastq_sample = fastq.rstrip(".fastq.gz")
+            fastq_sample = fastq.rpartition(".fastq.gz")[0]
             fastqs.append(
-                Messenger(
-                    fastq=fastq_full_path,
-                    fastq_sample=fastq_sample,
-                    experimental_sample=sample_dir,
-                    fastqc_report=None,
-                    star_bam=None,
-                    star_bam_bai=None,
-                    star_bam_with_rg=None,
-                    read_dist_report=None,
-                )
+                FastqMessenger(fastq=fastq_full_path,
+                               fastq_sample=fastq_sample,
+                               experimental_sample=sample_dir)
             )
     return fastqs
+
+
+@attr.s(slots=True)
+class SampleMessenger(object):
+    fastqs = attr.ib()
+    name = attr.ib()
+    star_bam_merged = attr.ib(default=None)
+    star_bam_with_rg_merged = attr.ib(default=None)
+    star_bam_with_rg_merged_dedupped = attr.ib(default=None)
+    star_bam_with_rg_merged_dedupped_snt = attr.ib(default=None)
+    star_bam_with_rg_merged_dedupped_snt_recal = attr.ib(default=None)
+    variant_calls = attr.ib(default=None)
+    variant_calls_with_filters = attr.ib(default=None)
+    variant_calls_filtered_general = attr.ib(default=None)
+    variant_calls_filtered_for_geneiase = attr.ib(default=None)
+    htseq_counts = attr.ib(default=None)
+    featureCounts_counts = attr.ib(default=None)
+    featureCounts_counts_simple = attr.ib(default=None)
 
 
 def collate_fastqs_to_experimental_samples(fastqs):
@@ -156,16 +265,9 @@ def collate_fastqs_to_experimental_samples(fastqs):
     exp_samples = []
     for exp_samp, fastq_iter in groupby(sample_sorted_fastqs, key=fastq_exp_sample):
         exp_samples.append(
-            Messenger(
+            SampleMessenger(
                 fastqs=list(fastq_iter),
                 name=exp_samp,
-                star_bam_merged=None,
-                star_bam_with_rg_merged=None,
-                star_bam_with_rg_merged_dedupped=None,
-                star_bam_with_rg_merged_dedupped_snt=None,
-                htseq_counts=None,
-                featureCounts_counts=None,
-                featureCounts_counts_simple=None,
             )
         )
     return exp_samples
@@ -183,20 +285,27 @@ GENOME_ANNOTATION_DIR = abspath("data/QC/annotation")
 ENSEMBL_ANNOTATIONS = abspath("data/annotations/ensembl/Homo_sapiens.GRCh38.89.gtf.gz")
 ENSEMBL_REFERENCE = abspath(
     "data/reference/ensembl/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz")
-REFSEQ_REFERENCE = abspath("data/reference/refseq/GCF_000001405.36_GRCh38.p10_genomic.fna.gz")
-REFSEQ_ANNOTATIONS = abspath(
-    "data/annotations/refseq/GCF_000001405.36_GRCh38.p10_genomic.gff.gz")
+# REFSEQ_REFERENCE = abspath("data/reference/refseq/GCF_000001405.36_GRCh38.p10_genomic.fna.gz")
+# REFSEQ_ANNOTATIONS = abspath(
+#    "data/annotations/refseq/GCF_000001405.36_GRCh38.p10_genomic.gff.gz")
 GO_TERMS = abspath("data/gene_sets/Human_GOALL_with_GO_iea_June_01_2017_symbol.gmt")
 
 RESULTS_DIR = abspath("results")
 FASTQC_DIR = join(RESULTS_DIR, "fastqc")
 RSEQC_DIR = join(RESULTS_DIR, "rseqc")
 ALIGNMENT_DIR = join(RESULTS_DIR, "alignment")
+VARIANT_DIR = join(RESULTS_DIR, "variants")
 HTSEQ_DIR = join(RESULTS_DIR, "htseq")
 FEATURECOUNTS_DIR = join(RESULTS_DIR, "featureCounts")
 ENSEMBL_ANNOT_DIR = join(RESULTS_DIR, "annotations", "ensembl")
 ENSEMBL_REF_DIR = join(RESULTS_DIR, "reference", "ensembl")
 GENE_SET_DIR = join(RESULTS_DIR, "gene_sets")
+
+BROAD_BUNDLE_KNOWN_SITES = [
+    'data/broad/bundle/hg38/1000G_phase1.snps.high_confidence.hg38.vcf.gz',
+    'data/broad/bundle/hg38/Mills_and_1000G_gold_standard.indels.hg38.vcf.gz',
+    'data/broad/bundle/hg38/dbsnp_146.hg38.vcf.gz',
+]
 
 
 def main():
@@ -244,7 +353,8 @@ def main():
     for fastq in fastqs:
         fastq.fastqc_report = join(FASTQC_DIR,
                                    fastq.experimental_sample,
-                                   basename(fastq.fastq).rstrip(".fastq.gz") + "_fastqc.html")
+                                   basename(fastq.fastq).rpartition(".fastq.gz")[
+                                       0] + "_fastqc.html")
         out_dir = dirname(fastq.fastqc_report)
         dm.add(fastq.fastqc_report, fastq.fastq,
                "fastqc --outdir {} {}".format(out_dir, fastq.fastq))
@@ -274,7 +384,8 @@ def main():
 
     exp_samples = collate_fastqs_to_experimental_samples(fastqs)
 
-    perform_broad_variant_calling(dmw, fastqs, exp_samples, ensembl_reference_object)
+    perform_broad_variant_calling(dmw, fastqs, exp_samples, ensembl_reference_object,
+                                  BROAD_BUNDLE_KNOWN_SITES, VARIANT_DIR)
 
     # QC summary
     multiqc_report = join(RESULTS_DIR, "multiqc", "multiqc_report.html")
@@ -351,7 +462,8 @@ def main():
     dmw.cleanup()
 
 
-def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_reference_object):
+def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_reference_object,
+                                  known_sites, variant_dir):
     """Broad pipeline for variant calling on RNA-seq data
 
     This analysis broadly follows GATK best practices as defined at
@@ -360,27 +472,77 @@ def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_refe
     """
 
     for fastq in fastqs:
-        fastq.star_bam_with_rg = fastq.star_bam.rpartition('.bam')[0] + '.with_rg.bam'
+        fastq.star_bam_with_rg = splitext(fastq.star_bam)[0] + '.with_rg.bam'
         dmw.add_read_groups(fastq.star_bam_with_rg, fastq)
     for sample in experimental_samples:
-        sample.star_bam_with_rg_merged = join(ALIGNMENT_DIR, "star_by_experimental_sample",
+        sample.star_bam_with_rg_merged = join(ALIGNMENT_DIR,
+                                              "star_by_experimental_sample",
                                               sample.name,
                                               sample.name + ".with_rg.bam")
-
         bams = [f.star_bam_with_rg for f in sample.fastqs]
         dmw.merge_bams(sample.star_bam_with_rg_merged, bams)
 
         sample.star_bam_with_rg_merged_dedupped = \
-            sample.star_bam_with_rg_merged.rpartition('.bam')[0] + '.dedup.bam'
+            splitext(sample.star_bam_with_rg_merged)[0] + '.dedup.bam'
         dmw.mark_duplicates(sample.star_bam_with_rg_merged_dedupped,
                             sample.star_bam_with_rg_merged,
                             remove_duplicates=True)
 
         sample.star_bam_with_rg_merged_dedupped_snt = \
-            sample.star_bam_with_rg_merged_dedupped.rpartition('.bam')[0] + '.snt.bam'
+            splitext(sample.star_bam_with_rg_merged_dedupped)[0] + '.snt.bam'
         dmw.split_n_trim(sample.star_bam_with_rg_merged_dedupped_snt,
                          sample.star_bam_with_rg_merged_dedupped,
                          genome_reference_object)
+        sample.star_bam_with_rg_merged_dedupped_snt_recal = \
+            splitext(sample.star_bam_with_rg_merged_dedupped_snt)[0] + '.recal.bam'
+        dmw.bqsr(sample.star_bam_with_rg_merged_dedupped_snt_recal,
+                 sample.star_bam_with_rg_merged_dedupped_snt,
+                 known_sites,
+                 genome_reference_object.fasta)
+
+        sample.variant_calls = join(variant_dir,
+                                    "star_by_experimental_sample",
+                                    sample.name,
+                                    sample.name + ".vcf.gz")
+        dmw.call_variants(sample.variant_calls, sample.star_bam_with_rg_merged_dedupped_snt_recal,
+                          genome_reference_object.fasta)
+        dmw.bcftools_stats(sample.variant_calls)
+
+        sample.variant_calls_with_filters = join(
+            dirname(sample.variant_calls),
+            'with_filters',
+            sample.name + '.with_filters.vcf.gz'
+        )
+        dmw.set_variant_filters(sample.variant_calls_with_filters,
+                                sample.variant_calls,
+                                genome_reference_object.fasta,
+                                filters=(' -window 35 -cluster 3'
+                                         ' -filterName FS -filter "FS > 30.0"'
+                                         ' -filterName QD -filter "QD < 2.0"'
+                                         ' -filterName DP -filter "DP < 10"'))
+        dmw.bcftools_stats(sample.variant_calls_with_filters)
+
+        sample.variant_calls_filtered_general = join(
+            dirname(sample.variant_calls),
+            'filtered_for_general',
+            sample.name + '.filtered_for_general.vcf.gz'
+        )
+        dmw.apply_variant_filters(sample.variant_calls_filtered_general,
+                                  sample.variant_calls_with_filters,
+                                  ['.', 'PASS', 'DP'])
+        dmw.bcftools_stats(sample.variant_calls_filtered_general)
+
+        sample.variant_calls_filtered_for_geneiase = join(
+            dirname(sample.variant_calls), 'filtered_for_geniase',
+            sample.name + '.filtered_for_geneiase.vcf.gz'
+        )
+        dmw.apply_variant_filters(sample.variant_calls_filtered_for_geneiase,
+                                  sample.variant_calls_with_filters,
+                                  ['.', 'PASS'])
+        dmw.bcftools_stats(sample.variant_calls_filtered_for_geneiase)
+
+    # variant_multiqc_report = join(variant_dir, 'multiqc_report.html')
+    # dmw.dm.add(variant_multiqc_report, )
 
 
 if __name__ == '__main__':
