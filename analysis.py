@@ -1,8 +1,8 @@
 import os
 from enum import Enum
 from tempfile import TemporaryDirectory
-from itertools import chain, groupby
-from os.path import abspath, join, basename, dirname, splitext
+from itertools import chain, groupby, filterfalse
+from os.path import abspath, join, basename, dirname, splitext, realpath, commonprefix
 import attr
 from functools import wraps
 
@@ -28,6 +28,8 @@ class DMWorker(object):
     dm = attr.ib()
     global_tmpdir = attr.ib()
     tmpdir = attr.ib(init=False)
+
+    bcftools_stats_targets = attr.ib(default=attr.Factory(set))
 
     def __attrs_post_init__(self):
         self.tmpdir = TemporaryDirectory(dir=self.global_tmpdir)
@@ -213,6 +215,7 @@ class DMWorker(object):
             output_file = input_vcf + '.stats'
         command = 'bcftools stats {} > {}'.format(input_vcf, output_file)
         self.dm.add(output_file, input_vcf, command)
+        self.bcftools_stats_targets.add(output_file)
 
 
 @attr.s(slots=True)
@@ -462,6 +465,16 @@ def main():
     dmw.cleanup()
 
 
+def in_directory(file, directory):
+    # make both absolute
+    directory = realpath(directory)
+    file = realpath(file)
+
+    # return true, if the common prefix of both is equal to directory
+    # e.g. /a/b/c/d.rst and directory is /a/b, the common prefix is /a/b
+    return commonprefix([file, directory]) == directory
+
+
 def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_reference_object,
                                   known_sites, variant_dir):
     """Broad pipeline for variant calling on RNA-seq data
@@ -541,8 +554,14 @@ def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_refe
                                   ['.', 'PASS'])
         dmw.bcftools_stats(sample.variant_calls_filtered_for_geneiase)
 
-    # variant_multiqc_report = join(variant_dir, 'multiqc_report.html')
-    # dmw.dm.add(variant_multiqc_report, )
+    variant_multiqc_report = join(variant_dir, 'multiqc_report-variants.html')
+    deps = filterfalse(
+        lambda x: in_directory(x, variant_dir),
+        dmw.bcftools_stats_targets
+    )
+    dmw.dm.add(variant_multiqc_report, deps,
+               'multiqc -m bcftools --filename {} -f {}'.format(variant_multiqc_report,
+                                                                variant_dir))
 
 
 if __name__ == '__main__':
