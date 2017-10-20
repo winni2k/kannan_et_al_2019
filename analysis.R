@@ -133,21 +133,37 @@ for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
     res = results(dds, contrast = c("group", design[1], design[2]))
+    res_unshrunk = res
     res = lfcShrink(dds, coef = 2, res = res)
+
     questions[[question_name]]$res = res
+    questions[[question_name]]$res_unshrunk = res_unshrunk
 }
 
 for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
     res = questions[[question_name]]$res
+    write.table(
+        res,
+        file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.tsv")),
+        sep = "\t"
+    )
     res_fdr_pc10 = res[(! is.na(res$padj)) & res$padj < 0.1,]
     write.table(
-    res_fdr_pc10,
-    file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".fdr_10pc.tsv")),
-    sep = "\t"
+        res_fdr_pc10,
+        file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".fdr_10pc.tsv")),
+        sep = "\t"
     )
     questions[[question_name]]$res_fdr_pc10 = res_fdr_pc10
+
+    unshrunk = questions[[question_name]]$res_unshrunk
+    unshrunk_fdr_pc10 = unshrunk[(! is.na(unshrunk$padj)) & unshrunk$padj < 0.1,]
+    write.table(
+        unshrunk_fdr_pc10,
+        file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".unshrunk.fdr_10pc.tsv")),
+        sep = "\t"
+    )
 }
 
 library(VennDiagram)
