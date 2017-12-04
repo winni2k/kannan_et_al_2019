@@ -11,12 +11,14 @@
 # biocLite("KEGGREST")
 # biocLite("clusterProfiler")
 # install.packages('UpSetR')
+# biocLite("biomaRt")
 library(org.Hs.eg.db)
 library(DESeq2)
 library(ggplot2)
 library(goseq)
 library(KEGGREST)
 library(clusterProfiler)
+library("biomaRt")
 
 output_dir = file.path("results", "featureCounts", "r_analysis")
 go_term_enrichment_output_dir = file.path(output_dir, "go_term_enrichment")
@@ -103,7 +105,7 @@ for (dat_name in c("log2", "rld")) {
 # differential expression analysis
 dds <- DESeq(dds)
 res <- results(dds)
-res
+# res
 
 # order results by p-value
 resOrdered <- res[order(res$padj),]
@@ -114,6 +116,16 @@ resOrdered <- res[order(res$padj),]
 design(dds) <- ~ group
 dds <- DESeq(dds)
 resultsNames(dds)
+
+# retrieve gene annotations from biomart 
+ensembl = useMart("ensembl",dataset="hsapiens_gene_ensembl")
+# head(listAttributes(ensembl))
+gene_annotations = getBM(
+    attributes=c('ensembl_gene_id', 'hgnc_symbol', 'entrezgene',
+                 'chromosome_name', 'start_position', 'end_position'),
+    mart = ensembl
+)
+
 
 # 1. What genes are differentially expressed between control (separate) and resistant (separate)
 # cells at 24 hours?
@@ -129,24 +141,36 @@ q4 = list(design = c("SepCon120h", "CocCon120h")),
 q6a = list(design = c("CocCon24h", "SepRes24h")),
 q6b = list(design = c("CocCon120h", "SepRes120h"))
 )
+question_name = 'q1'
 for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
-    res = results(dds, contrast = c("group", design[1], design[2]))
+    contrasts=c("group", design[1], design[2])
+    res = results(dds, contrast = contrasts)
+    head(merge(res, gene_annotations))
+    res_unfiltered = results(dds, contrast = contrasts, independentFiltering=FALSE)
     res_unshrunk = res
     res = lfcShrink(dds, coef = 2, res = res)
 
     questions[[question_name]]$res = res
     questions[[question_name]]$res_unshrunk = res_unshrunk
+    questions[[question_name]]$res_unfiltered = res_unfiltered
 }
+
 
 for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
     res = questions[[question_name]]$res
+    res_unfiltered =  questions[[question_name]]$res_unfiltered
     write.table(
         res,
         file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.tsv")),
+        sep = "\t"
+    )
+    write.table(
+        res_unfiltered,
+        file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.unfiltered.tsv")),
         sep = "\t"
     )
     res_fdr_pc10 = res[(! is.na(res$padj)) & res$padj < 0.1,]
