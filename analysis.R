@@ -3,15 +3,16 @@
 # Created by: winni
 # Created on: 6/23/17
 
-# source("http://bioconductor.org/biocLite.R")
-# biocLite("DESeq2")
-# biocLite("goseq")
-# biocLite("TxDb.Hsapiens.UCSC.hg38.knownGene")
-# install.packages("org.Hs.eg.db", repos="http://bioconductor.org/packages/3.5/data/annotation")
-# biocLite("KEGGREST")
-# biocLite("clusterProfiler")
-# install.packages('UpSetR')
-# biocLite("biomaRt")
+## source("http://bioconductor.org/biocLite.R")
+## biocLite("DESeq2")
+## biocLite("goseq")
+## biocLite("TxDb.Hsapiens.UCSC.hg38.knownGene")
+## biocLite("org.Hs.eg.db")
+## biocLite("KEGGREST")
+## biocLite("clusterProfiler")
+## install.packages('UpSetR')
+## biocLite("biomaRt")
+## install.packages('VennDiagram')
 library(org.Hs.eg.db)
 library(DESeq2)
 library(ggplot2)
@@ -19,6 +20,9 @@ library(goseq)
 library(KEGGREST)
 library(clusterProfiler)
 library("biomaRt")
+library(VennDiagram)
+library(ggplot2)
+
 
 output_dir = file.path("results", "featureCounts", "r_analysis")
 go_term_enrichment_output_dir = file.path(output_dir, "go_term_enrichment")
@@ -41,18 +45,18 @@ coldata$CellType = ifelse(grepl("Resistant", coldata$Sample), "Resistant", "Cont
 coldata$CultureType = ifelse(grepl("culture", coldata$Sample), "Coculture", "Separate")
 levels(coldata$Time.point) = c("120h", "24h")
 coldata$group = factor(
-paste(
-substr(coldata$CultureType, 1, 3),
-substr(coldata$CellType, 1, 3),
-coldata$Time.point,
-sep = ""
-)
+    paste(
+        substr(coldata$CultureType, 1, 3),
+        substr(coldata$CellType, 1, 3),
+        coldata$Time.point,
+        sep = ""
+    )
 )
 
 dds <- DESeqDataSetFromMatrix(
-countData = cts,
-colData = coldata,
-design = ~ Time.point + CellType + CultureType
+    countData = cts,
+    colData = coldata,
+    design = ~ Time.point + CellType + CultureType
 )
 
 # Remove rows that have almost no reads
@@ -78,7 +82,6 @@ pcs = as.data.frame(myPca$x)
 pcs = merge(coldata, pcs, by = "row.names", sort = FALSE)
 
 # first two principle components
-library(ggplot2)
 g = ggplot(aes(x = PC1, y = PC2, color = Sample, shape = Time.point), data = pcs) + geom_point()
 ggsave(file.path(output_dir, 'pca_plot.ggplot.pdf'))
 
@@ -126,7 +129,6 @@ gene_annotations = getBM(
     mart = ensembl
 )
 
-
 # 1. What genes are differentially expressed between control (separate) and resistant (separate)
 # cells at 24 hours?
 # 2. What genes are differentially expressed between control (separate) and control (co-culture) at 24 hours?
@@ -141,28 +143,28 @@ q4 = list(design = c("SepCon120h", "CocCon120h")),
 q6a = list(design = c("CocCon24h", "SepRes24h")),
 q6b = list(design = c("CocCon120h", "SepRes120h"))
 )
-question_name = 'q1'
+question_name = 'q2'
 for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
     contrasts=c("group", design[1], design[2])
-    res = results(dds, contrast = contrasts)
-    head(merge(res, gene_annotations))
+
+    res_unshrunk = results(dds, contrast = contrasts)
+
     res_unfiltered = results(dds, contrast = contrasts, independentFiltering=FALSE)
-    res_unshrunk = res
-    res = lfcShrink(dds, coef = 2, res = res)
+    res = lfcShrink(dds, contrast = contrasts, res = res_unshrunk)
 
     questions[[question_name]]$res = res
     questions[[question_name]]$res_unshrunk = res_unshrunk
     questions[[question_name]]$res_unfiltered = res_unfiltered
 }
 
-
 for (question_name in names(questions)) {
     print(question_name)
     design = questions[[question_name]]$design
     res = questions[[question_name]]$res
     res_unfiltered =  questions[[question_name]]$res_unfiltered
+    print(head(res))
     write.table(
         res,
         file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.tsv")),
@@ -171,7 +173,8 @@ for (question_name in names(questions)) {
     write.table(
         res_unfiltered,
         file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.unfiltered.tsv")),
-        sep = "\t"
+        sep = "\t",
+        row.names=FALSE
     )
     res_fdr_pc10 = res[(! is.na(res$padj)) & res$padj < 0.1,]
     write.table(
@@ -190,7 +193,6 @@ for (question_name in names(questions)) {
     )
 }
 
-library(VennDiagram)
 gene_lists = lapply(lapply(questions, "[[", "res_fdr_pc10"), rownames)
 v1 <- venn.diagram(gene_lists[1 : 4], filename = NULL, fill = rainbow(4))
 pdf(file.path(output_dir, "q1-q4.venn.pdf"), width = 5, height = 5)
@@ -271,8 +273,8 @@ for(q in questions){
     cnetplot(kk, showCategory=8, categorySize="pvalue", foldChange=geneList)
     dev.off()
 
-    pdf(file.path(kegg_dir, paste0(design_str,".upsetplot.pdf")))
-    upsetplot(kk)
-    dev.off()
+    ## pdf(file.path(kegg_dir, paste0(design_str,".upsetplot.pdf")))
+    ## upsetplot(kk)
+    ## dev.off()
 
 }
