@@ -108,7 +108,6 @@ for (dat_name in c("log2", "rld")) {
 # differential expression analysis
 dds <- DESeq(dds)
 res <- results(dds)
-# res
 
 # order results by p-value
 resOrdered <- res[order(res$padj),]
@@ -152,6 +151,7 @@ for (question_name in names(questions)) {
     res_unshrunk = results(dds, contrast = contrasts)
 
     res_unfiltered = results(dds, contrast = contrasts, independentFiltering=FALSE)
+    
     res = lfcShrink(dds, contrast = contrasts, res = res_unshrunk)
 
     questions[[question_name]]$res = res
@@ -164,6 +164,7 @@ for (question_name in names(questions)) {
     design = questions[[question_name]]$design
     res = questions[[question_name]]$res
     res_unfiltered =  questions[[question_name]]$res_unfiltered
+
     print(head(res))
     write.table(
         res,
@@ -173,8 +174,7 @@ for (question_name in names(questions)) {
     write.table(
         res_unfiltered,
         file.path(output_dir, "hits", paste0(design[1], "_", design[2], ".padj.unfiltered.tsv")),
-        sep = "\t",
-        row.names=FALSE
+        sep = "\t"
     )
     res_fdr_pc10 = res[(! is.na(res$padj)) & res$padj < 0.1,]
     write.table(
