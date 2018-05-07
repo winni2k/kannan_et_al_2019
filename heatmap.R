@@ -10,6 +10,13 @@ library(KEGGREST)
 library(tidyverse)
 library(DESeq2)
 library("biomaRt")
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(gplots)
+library(dendextend)
+library(RColorBrewer)
+
 ### KEGG
 ### listDatabases()
 ### kegg_human = keggList("hsa")
@@ -19,8 +26,19 @@ library("biomaRt")
 listDatabases()
 keggList("hsa")
 pathways = keggLink("hsa", "pathway")
-kegg_cancer_pathway = "path:hsa05200"
-kegg_cancer_pathway_genes = pathways[names(pathways) == kegg_cancer_pathway]
+## 05162  Measles
+## 05164  Influenza A
+## 05161  Hepatitis B
+## 05160  Hepatitis C
+## 05168  Herpes simplex infection
+## 05167  Kaposi's sarcoma-associated herpesvirus infection
+## 05169  Epstein-Barr virus infection
+## 05165  Human papillomavirus infection
+pathways_of_interest_nums =c('05162', '05164','05160','05168')
+pathways_of_interest = paste0('path:hsa', pathways_of_interest_nums)
+
+pathway_genes = pathways[names(pathways) %in% pathways_of_interest]
+length(pathway_genes)
 
 get_table_as_tibble = function(file){
     res = read.table(file)
@@ -37,15 +55,13 @@ gene_annotations = getBM(
     mart = ensembl
 )
 
-kegg_cancer_pathway_entrez_ids = as.integer(gsub('hsa:','',kegg_cancer_pathway_genes))
-kcp_gene_annotations = gene_annotations[which(gene_annotations$entrezgene %in% kegg_cancer_pathway_entrez_ids),]
-
-
+pathway_entrez_ids = as.integer(gsub('hsa:','',pathway_genes))
+pathway_gene_annotations = as.tibble(gene_annotations[which(gene_annotations$entrezgene %in% pathway_entrez_ids),])
+pathway_gene_annotations
 ### load files
-
 results_unfiltered = c(
 './results/featureCounts/r_analysis/hits/SepCon120h_SepRes120h.padj.unfiltered.tsv',
-'./results/featureCounts/r_analysis/hits/SepCon24h_SepRes24h.padj.unfiltered.tsv',
+'./results/featureCounts/r_analysis/hits/SepCon24h_SepRes24h.padj.unfiltered.tsv'
 )
 results_shrunk = c(
     './results/featureCounts/r_analysis/hits/SepCon120h_SepRes120h.padj.tsv',
@@ -67,11 +83,10 @@ for(row_num in 1:nrow(p_tables)){
     row = p_tables[row_num,]
     res1 = get_table_as_tibble(row$exp1_file)
     res2 = get_table_as_tibble(row$exp2_file)
-    row$exp1_name
     res1$experiment = row$exp1_name
     res2$experiment = row$exp2_name
     res = bind_rows(res1, res2)
-    res_kcp = res[res$gene %in% kcp_gene_annotations$ensembl_gene_id,]
+    res_kcp = res[res$gene %in% pathway_gene_annotations$ensembl_gene_id,]
     dim(res_kcp)
     for(sort_type in sort_types){
         res_table = res_kcp
@@ -83,17 +98,13 @@ for(row_num in 1:nrow(p_tables)){
             geom_tile(aes(fill = log2FoldChange)) + 
             scale_fill_gradient2(midpoint = 1)
         g = g + labs(title=paste("Spearman correlation:", cor(res1$log2FoldChange, res2$log2FoldChange, method='spearman')))
-        out_file = file.path('analyses/heatmap',paste(exp1, 'vs',exp2, row$lfc_type ,sort_type, 'heatmap.png', sep='.'))
+        out_file = file.path('analyses/heatmap',paste(row$exp1_name, 'vs', row$exp2_name, row$lfc_type ,sort_type, 'heatmap.png', sep='.'))
         ggsave(out_file)
     }
 }
 
 
-
-
-
 ## plot data
-
 
 ### for later
 ## lets load up the raw counts and regularize them for the heatmap
@@ -120,8 +131,7 @@ coldata$group = factor(
     )
 )
 coldata$Time.point = coldata$"Time point"
-coldata_df = coldata %>% as.data.frame
-names(coldata_df)
+coldata$full_sample_name = gsub(' ', '', paste(coldata$group, coldata$Repeat, sep='.'))
 
 dds <- DESeqDataSetFromMatrix(
     countData = cts,
@@ -139,7 +149,58 @@ rld = bind_cols(gene_lengths, rld)
 
 # filter out genes with low counts
 rld = rld[rowSums(counts(dds)) > 1, ]
+rld
+pathway_rld = inner_join(pathway_gene_annotations, rld, c('ensembl_gene_id' = 'ensembl_id'))
+pathway_rld
 
-coldata$
+
+remove_cols = which(names(pathway_rld) %in% filter(coldata, Sample != 'Control' & Sample != 'Resistant')$sample_name)
+sep_culture_pathway_rld = pathway_rld[, -remove_cols]
+
+sep_culture_pathway_rld = sep_culture_pathway_rld[!duplicated(sep_culture_pathway_rld$ensembl_gene_id),]
+
+rld_dist = dist(scale(sep_culture_pathway_rld[,8:15]), method='euclidean')
+
+clustering = hclust( rld_dist, method = "ward.D" )
+plot(clustering)
+ord <- clustering$order
+sep_culture_pathway_rld[ord < 5,] %>% print(width=1000)
+sep_culture_pathway_rld$order = ord
+sep_culture_pathway_rld
+
+sep_culture_pathway_rld$ensembl_gene_id= factor(
+    sep_culture_pathway_rld$ensembl_gene_id,
+    levels = sep_culture_pathway_rld$ensembl_gene_id[sep_culture_pathway_rld$order]
+)
 
 
+sep_culture_pathway_rld_melt = gather(sep_culture_pathway_rld, sample_name, rlog, PAV1:PAV19)
+sep_culture_pathway_rld_melt = left_join(sep_culture_pathway_rld_melt, coldata)
+
+
+names(sep_culture_pathway_rld_melt)
+ggplot( sep_culture_pathway_rld_melt, aes(full_sample_name, hgnc_symbol) ) +
+  geom_tile(aes(fill = rlog)) +
+    scale_fill_gradient(low="white", high=muted("red"))
+
+## scaled_iris2 <- iris2 %>% as.matrix %>% scale
+sep_culture_pathway_rld_mat = as.matrix(sep_culture_pathway_rld[,grep('PAV', names(sep_culture_pathway_rld))])
+some_col_func <- function(n) rev(colorspace::heat_hcl(n, c = c(80, 30), l = c(30, 90), power = c(1/5, 1.5)))
+names(coldata)
+colnames(sep_culture_pathway_rld_mat) = coldata$full_sample_name[match(colnames(sep_culture_pathway_rld_mat), coldata$sample_name)]
+
+hist(sep_culture_pathway_rld_mat)
+min(sep_culture_pathway_rld_mat)
+out_file = file.path('analyses/heatmap/separate_some-viral-pathways_heatmap.pdf')
+
+pdf(out_file, height=30, width=8)
+heatmap.2(sep_culture_pathway_rld_mat,
+          labRow=sep_culture_pathway_rld$hgnc_symbol,
+          col=brewer.pal(9,"Reds"),
+          scale='row',
+          trace='none',
+          margins=c(10,5),
+          xlab='Biological sample',
+          ylab='HGNC gene symbol',
+          main='Row-scaled expression of genes in\nMeasles, Influenza A, Hepatitis C,\nor Herpes simplex KEGG pathway')
+dev.off()
