@@ -193,7 +193,7 @@ hist(sep_culture_pathway_rld_mat)
 min(sep_culture_pathway_rld_mat)
 out_file = file.path('analyses/heatmap/separate_some-viral-pathways_heatmap.pdf')
 
-pdf(out_file, height=30, width=8)
+pdf(out_file, height=34, width=8)
 heatmap.2(sep_culture_pathway_rld_mat,
           labRow=sep_culture_pathway_rld$hgnc_symbol,
           col=brewer.pal(9,"Reds"),
