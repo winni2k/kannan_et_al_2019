@@ -1,8 +1,10 @@
 import os
 from enum import Enum
+import tempfile
 from tempfile import TemporaryDirectory
 from itertools import chain, groupby, filterfalse
 from os.path import abspath, join, basename, dirname, splitext, realpath, commonprefix
+from os import makedirs
 import attr
 from functools import wraps
 
@@ -50,9 +52,9 @@ class DMWorker(object):
                      # so lib and sample identifiers can be the same
                      " RGSM={2} RGLB={2}"
                      # Instrument:Run_number:Flowcell_id:lane
-                     " RGID=$$(samtools view {0} | head -1 | cut -f1-4 -d':')"
+                     " RGID=$(samtools view {0} | head -1 | cut -f1-4 -d':')"
                      # The ID + library prep id
-                     " RGPU=$$(samtools view {0} | head -1 | cut -f1-4 -d':'):{2}"
+                     " RGPU=$(samtools view {0} | head -1 | cut -f1-4 -d':'):{2}"
                      ).format(fastq.star_bam, bam_with_rg, fastq.experimental_sample))
         return bam_with_rg
 
@@ -70,7 +72,7 @@ class DMWorker(object):
 
     def merge_bams(self, merged_bam, bams, add_read_group=False):
         if add_read_group:
-            tmpdir = TemporaryDirectory(dir=self.tmpdir.name)
+            tmpdir = tempfile.mkdtemp(dir=self.tmpdir.name)
             commands = [
                 "cd {}".format(tmpdir),
                 " && ",
@@ -97,7 +99,7 @@ class DMWorker(object):
         self.dm.add(trimmed_bam,
                     [input_bam, genome_reference_object.index, genome_reference_object.ref_dict],
                     (
-                        "gatk -Xmx10g"
+                        "GenomeAnalysisTK -Xmx10g"
                         " -T SplitNCigarReads "
                         "-R {} -I {} -o {} "
                         "-rf ReassignOneMappingQuality -RMQF 255 -RMQT 60 "
@@ -137,7 +139,7 @@ class DMWorker(object):
         if isinstance(known_sites, str):
             known_sites = [known_sites]
         command = (
-            'gatk -T BaseRecalibrator'
+            'GenomeAnalysisTK -T BaseRecalibrator'
             ' -R {}'
             ' -I {}'
             ' -o {}'
@@ -151,7 +153,7 @@ class DMWorker(object):
         if isinstance(known_sites, str):
             known_sites = [known_sites]
         command = (
-            'gatk -T BaseRecalibrator'
+            'GenomeAnalysisTK -T BaseRecalibrator'
             ' -R {}'
             ' -I {}'
             ' -BQSR {}'
@@ -163,7 +165,7 @@ class DMWorker(object):
 
     def bqsr_generate_recal_plots(self, output_plots, before_table, after_table, ref_fasta):
         command = (
-            'gatk -T AnalyzeCovariates'
+            'GenomeAnalysisTK -T AnalyzeCovariates'
             ' -R {}'
             ' -before {}'
             ' -after {}'
@@ -175,7 +177,7 @@ class DMWorker(object):
         if isinstance(known_sites, str):
             known_sites = [known_sites]
         command = (
-            'gatk -T PrintReads'
+            'GenomeAnalysisTK -T PrintReads'
             ' -R {}'
             ' -I {}'
             ' -o {}'
@@ -184,7 +186,7 @@ class DMWorker(object):
         self.dm.add(output_bam, known_sites + [recal_table, input_bam], command)
 
     def call_variants(self, output_vcf, input_bam, ref_fasta):
-        command = ('gatk -T HaplotypeCaller'
+        command = ('GenomeAnalysisTK -T HaplotypeCaller'
                    ' -R {}'
                    ' -I {}'
                    ' -dontUseSoftClippedBases'
@@ -194,7 +196,7 @@ class DMWorker(object):
 
     def set_variant_filters(self, output_vcf, input_vcf, ref_fasta,
                             filters=""):
-        command = ("gatk -T VariantFiltration"
+        command = ("GenomeAnalysisTK -T VariantFiltration"
                    " -R {}"
                    " -V {}"
                    ' -o {}').format(ref_fasta, input_vcf, output_vcf)
@@ -281,6 +283,7 @@ MAPPING_THREADS = 4
 FLOW_CELL_ID = 'HYF5WBGX2'
 
 GLOBAL_TMPDIR = abspath("tmp")
+makedirs(GLOBAL_TMPDIR,exist_ok=True)
 
 # This is the location where Kiran downloaded the FASTQ files to
 RNA_SEQ_DIR = abspath("data/AdHa160517-40613574")
@@ -392,7 +395,8 @@ def main():
 
     # QC summary
     multiqc_report = join(RESULTS_DIR, "multiqc", "multiqc_report.html")
-    dm.add(multiqc_report, chain(*[(f.fastqc_report, f.star_bam) for f in fastqs]),
+    deps = list(chain(*[(f.fastqc_report, f.star_bam) for f in fastqs]))
+    dm.add(multiqc_report, deps,
            "multiqc -d -dd 1 -f --outdir {} {} {}".format(dirname(multiqc_report), FASTQC_DIR,
                                                           ALIGNMENT_DIR))
 
@@ -426,17 +430,17 @@ def main():
 
     sample_multiqc_report = join(RESULTS_DIR, "multiqc_per_experimental_sample",
                                  "multiqc_report.html")
+    deps = [s.featureCounts_counts for s in exp_samples]
     dm.add(sample_multiqc_report,
-           chain(*[(s.featureCounts_counts,) for s in exp_samples]),
-           "multiqc -f --outdir {} {} {}".format(dirname(sample_multiqc_report), HTSEQ_DIR,
-                                                 FEATURECOUNTS_DIR))
+           deps,
+           "multiqc -f --outdir {} {}".format(dirname(sample_multiqc_report), FEATURECOUNTS_DIR))
 
     # calculate gene lengths
     fc_gene_lengths = join(FEATURECOUNTS_DIR, "gene_lengths.tsv")
     dm.add(fc_gene_lengths, exp_samples[0].featureCounts_counts,
            ("grep '^ENSG' {}"
             " | cut -f1,3,4"
-            " | perl -ane 'print $$F[0] . \"\\t\" . ($$F[2] - $$F[1]) . \"\\n\"' > {} ").format(
+            " | perl -ane 'print $F[0] . \"\\t\" . ($F[2] - $F[1]) . \"\\n\"' > {} ").format(
                exp_samples[0].featureCounts_counts, fc_gene_lengths))
 
     # collate counts into one csv
@@ -479,8 +483,8 @@ def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_refe
                                   known_sites, variant_dir):
     """Broad pipeline for variant calling on RNA-seq data
 
-    This analysis broadly follows GATK best practices as defined at
-    https://software.broadinstitute.org/gatk/documentation/article.php?id=3891,
+    This analysis broadly follows GENOMEANALYSISTK best practices as defined at
+    https://software.broadinstitute.org/GenomeAnalysisTK/documentation/article.php?id=3891,
     retrieved 2017-08-14
     """
 
@@ -555,11 +559,7 @@ def perform_broad_variant_calling(dmw, fastqs, experimental_samples, genome_refe
         dmw.bcftools_stats(sample.variant_calls_filtered_for_geneiase)
 
     variant_multiqc_report = join(variant_dir, 'multiqc_report-variants.html')
-    deps = filterfalse(
-        lambda x: in_directory(x, variant_dir),
-        dmw.bcftools_stats_targets
-    )
-    dmw.dm.add(variant_multiqc_report, deps,
+    dmw.dm.add(variant_multiqc_report, dmw.bcftools_stats_targets,
                'multiqc -m bcftools --filename {} -f {}'.format(variant_multiqc_report,
                                                                 variant_dir))
 

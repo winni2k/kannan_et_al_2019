@@ -14,5 +14,6 @@ dependencies:
   - subread
   - bedops
   - gatk
+  - bcftools
   - pip:
     - dmpy

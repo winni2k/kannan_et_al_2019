@@ -3,16 +3,6 @@
 # Created by: winni
 # Created on: 6/23/17
 
-## source("http://bioconductor.org/biocLite.R")
-## biocLite("DESeq2")
-## biocLite("goseq")
-## biocLite("TxDb.Hsapiens.UCSC.hg38.knownGene")
-## biocLite("org.Hs.eg.db")
-## biocLite("KEGGREST")
-## biocLite("clusterProfiler")
-## install.packages('UpSetR')
-## biocLite("biomaRt")
-## install.packages('VennDiagram')
 library(org.Hs.eg.db)
 library(DESeq2)
 library(ggplot2)
@@ -26,12 +16,13 @@ library(ggplot2)
 
 output_dir = file.path("results", "featureCounts", "r_analysis")
 go_term_enrichment_output_dir = file.path(output_dir, "go_term_enrichment")
+dir.create(go_term_enrichment_output_dir, showWarnings=FALSE)
 kegg_dir = file.path(output_dir, "kegg_analysis")
 dir.create(kegg_dir, showWarnings=FALSE)
 
 # read in the data
 cts = read.table("results/featureCounts/all_sample_counts.csv", sep = " ", row.names = 1, header = TRUE)
-names(cts) = gsub('\\.\\d+\\.bam', '', gsub('.*PAV', 'PAV', names(cts)))
+names(cts) = gsub('\\.bam', '', gsub('.*PAV', 'PAV', names(cts)))
 head(cts)
 
 # read in sample coldata
@@ -39,6 +30,7 @@ coldata = read.table("data/sample_meta_data.tsv", sep = "\t", header = TRUE)
 rownames(coldata) = paste0("PAV", coldata$Pavitra.Tube.number)
 
 # reorder counts
+
 cts <- cts[, rownames(coldata)]
 stopifnot(all(rownames(coldata) == colnames(cts)))
 coldata$CellType = ifelse(grepl("Resistant", coldata$Sample), "Resistant", "Control")

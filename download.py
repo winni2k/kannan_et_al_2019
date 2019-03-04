@@ -31,13 +31,13 @@ args = get_dm_arg_parser('RNA-seq analysis').parse_args()
 dm = DistributedMake(args_object=args)
 down = Downloader(dm)
 
-down.get_dir(
-    "https://export.uppmax.uu.se/b2013006/downloads/courses/RNAseqWorkshop/reference/hg19_Gencode14.overhang75/",
-    "data/reference/hg19_Gencode14.overhangt75_star"
-)
-down.get_dir(
-    "https://export.uppmax.uu.se/b2013006/downloads/courses/RNAseqWorkshop/QC/annotation/",
-    "data/QC/annotation")
+# down.get_dir(
+#     "https://export.uppmax.uu.se/b2013006/downloads/courses/RNAseqWorkshop/reference/hg19_Gencode14.overhang75/",
+#     "data/reference/hg19_Gencode14.overhangt75_star"
+# )
+# down.get_dir(
+#     "https://export.uppmax.uu.se/b2013006/downloads/courses/RNAseqWorkshop/QC/annotation/",
+#     "data/QC/annotation")
 
 down.get_file_to_dir(
     'ftp://ftp.ensembl.org/pub/release-89/gtf/homo_sapiens/Homo_sapiens.GRCh38.89.gtf.gz',
