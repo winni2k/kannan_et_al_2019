@@ -3,7 +3,7 @@ kannan_et_al_2019
 
 RNA-seq analyses for [kannan2019]_.
 
-.. [kannan2019] Kannan, et al. (2019) Radiation resistant cancer cells enhance the survival and resistance of sensitive cells in prostate spheroids. bioRxiv: 564724. doi: https://doi.org/10.1101/564724
+.. [kannan2019] Kannan, et al. (2019). Radiation resistant cancer cells enhance the survival and resistance of sensitive cells in prostate spheroids. bioRxiv: 564724. doi: https://doi.org/10.1101/564724
 
 Setup
 -----
