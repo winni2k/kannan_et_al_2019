@@ -14,7 +14,7 @@ Setup
 Run analysis
 ------------
 
-Please obtain a copy of the raw sequencing data and store it in `data`.
+Please obtain a copy of the raw sequencing data and store it in the ``data`` directory (to be updated).
 ::
 
    # activate the rna_seq conda evironment
