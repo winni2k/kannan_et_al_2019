@@ -40,7 +40,7 @@ Building the singularity container
    sudo singularity build bioc3.8.simg Singularity.Bioc3.8
    sudo singularity build kannan2019.simg Singularity
 
-   # for singularity version 3, convert to SIF format
+   # for singularity version 3, convert to SIF
    singularity build kannan2019.sif knnan2019.simg
 
    # cleanup
